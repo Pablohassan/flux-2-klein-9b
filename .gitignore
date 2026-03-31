@@ -1,0 +1,26 @@
+# Tout ignorer par défaut
+*
+
+# Inclure uniquement les dossiers flux2-klein
+!deploy/
+!deploy/flux2-klein-api/
+!deploy/flux2-klein-api/**
+!deploy/flux2-klein-runtime/
+!deploy/flux2-klein-runtime/**
+!.gitignore
+
+# Exclure les fichiers sensibles/volumineux
+deploy/**/.env
+deploy/**/__pycache__/
+deploy/**/*.pyc
+deploy/**/logs/
+deploy/**/*.pid
+deploy/**/outputs/
+deploy/**/.venv/
+deploy/**/vendor/flux2/.git/
+deploy/**/vendor/flux2/.git/**
+deploy/**/*.egg-info/
+deploy/**/*.safetensors
+deploy/**/*.bin
+deploy/**/*.pt
+deploy/**/*.ckpt
