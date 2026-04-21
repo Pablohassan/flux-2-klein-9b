@@ -5,6 +5,8 @@
 !deploy/
 !deploy/qwen-image-api/
 !deploy/qwen-image-api/**
+!docs/
+!docs/**
 !.gitignore
 
 # Exclure les fichiers sensibles/volumineux
