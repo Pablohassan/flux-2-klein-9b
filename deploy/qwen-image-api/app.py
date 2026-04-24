@@ -20,6 +20,12 @@ runtime = load_runtime_from_env()
 JOBS: dict[str, JobRecord] = {}
 
 
+@app.on_event("startup")
+async def warmup_model() -> None:
+    """Cold-start mode: model loads on first request, not at startup."""
+    pass
+
+
 async def require_api_key(x_api_key: str | None = Header(default=None)) -> None:
     if API_KEY and x_api_key != API_KEY:
         raise HTTPException(status_code=401, detail="invalid api key")
