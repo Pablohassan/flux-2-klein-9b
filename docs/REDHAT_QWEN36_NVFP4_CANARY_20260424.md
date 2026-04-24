@@ -189,6 +189,86 @@ and must not contain:
 Error loading tokenizer
 ```
 
+## Corrected Tokenizer Benchmark
+
+Run date: `2026-04-24`.
+
+The benchmark was rerun after setting:
+
+- `BENCH_TOKENIZER=RedHatAI/Qwen3.6-35B-A3B-NVFP4`
+- `BENCH_HF_HOME=/home/pablo/.cache/hf-download-redhat`
+
+Lifecycle result:
+
+- router bench mode enabled, traffic drained
+- local production model stopped and verified down
+- RedHat NVFP4 canary launched on `:18054`
+- canary healthy after `140s`
+- `llama-benchy` ran at `c1,c4,c8,c16,c24`
+- canary stopped
+- local production restored and healthy after `152s`
+- router bench mode disabled
+- final health check confirmed production and router healthy
+
+Validation:
+
+- canary log showed `tokenizer: RedHatAI/Qwen3.6-35B-A3B-NVFP4`
+- no `Error loading tokenizer` appeared in the rerun log
+- warmup token delta was stable at `Server:32 Local:21` and `Server:37 Local:21`
+
+The remaining token delta is therefore not the previous invalid-tokenizer-path
+fallback; it appears to come from server-side chat/template wrapping versus
+`llama-benchy` local token accounting.
+
+Artifacts:
+
+- memory guard log: `/tmp/redhat_qwen36_nvfp4_bench_hftokenizer_memguard_20260424_112920.log`
+- canary log:
+  `deploy/qwen36a3b-nvfp4-redhat-v0192rc1dev30-flashinfercutlass-toolcallsanitize-canary-20260424/canary_bench_20260424_112920.log`
+- result files:
+  `deploy/qwen36a3b-nvfp4-redhat-v0192rc1dev30-flashinfercutlass-toolcallsanitize-canary-20260424/llama_benchy_redhat_qwen36a3b_nvfp4_v0192rc1dev30_c*_20260424_112920.md`
+
+Corrected benchmark results:
+
+| Concurrency | PP 128 tok/s | TG 256 tok/s total | TG tok/s per request | Peak TG tok/s | TTFR |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| c1 | 1444.86 | 38.26 | 38.26 | 40.33 | 91.58 ms |
+| c4 | 2210.96 | 111.16 | 31.64 | 127.00 | 184.80 ms |
+| c8 | 3428.96 | 175.63 | 25.44 | 221.00 | 243.26 ms |
+| c16 | 4499.45 | 278.24 | 19.05 | 345.33 | 414.87 ms |
+| c24 | 5068.32 | 319.76 | 15.90 | 432.00 | 573.58 ms |
+
+Compared with the `20260421` production baseline:
+
+| Concurrency | PP delta | TG total delta | TTFR delta |
+| --- | ---: | ---: | ---: |
+| c1 | +21.0% | -20.4% | -15.9% |
+| c4 | +2.4% | +8.4% | -8.0% |
+| c8 | +27.2% | +17.2% | -28.9% |
+| c16 | +29.1% | +41.7% | -25.0% |
+| c24 | +33.3% | +27.1% | -26.3% |
+
+Compared with the first RedHat run using the invalid host tokenizer path:
+
+| Concurrency | PP delta | TG total delta | TTFR delta |
+| --- | ---: | ---: | ---: |
+| c1 | -2.8% | +4.6% | +3.8% |
+| c4 | +9.5% | -3.8% | -7.8% |
+| c8 | -1.7% | +3.6% | -4.3% |
+| c16 | +3.7% | +5.3% | -0.9% |
+| c24 | +4.7% | +4.4% | +5.4% |
+
+Read:
+
+- the corrected run keeps the same performance shape as the first run
+- RedHat NVFP4 remains very strong from `c8` upward
+- the single-user decode regression versus production remains real, though
+  slightly smaller after the corrected tokenizer run (`-20.4%` instead of
+  roughly `-24%`)
+- high-concurrency decode and prefill are stronger than production
+- `c24` is the best headline case: `+33.3%` PP, `+27.1%` TG, and `-26.3%` TTFR
+  versus production
+
 ## Quality Campaign
 
 Run date: `2026-04-24`.
