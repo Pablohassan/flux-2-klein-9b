@@ -1,4 +1,4 @@
-# RedHatAI Qwen3.6 35B A3B NVFP4 Canary Prep - 2026-04-24
+# RedHatAI Qwen3.6 35B A3B NVFP4 Canary - 2026-04-24
 
 ## Source Examined
 
@@ -70,7 +70,10 @@ deploy/qwen36a3b-nvfp4-redhat-v0192rc1dev30-flashinfercutlass-toolcallsanitize-c
 
 Key settings:
 
-- `MODEL_ROOT=RedHatAI/Qwen3.6-35B-A3B-NVFP4`
+- `MODEL_ROOT=/models/RedHatAI-Qwen3.6-35B-A3B-NVFP4`
+- `TOKENIZER_ROOT=/models/RedHatAI-Qwen3.6-35B-A3B-NVFP4`
+- `BENCH_TOKENIZER=RedHatAI/Qwen3.6-35B-A3B-NVFP4`
+- `BENCH_HF_HOME=/home/pablo/.cache/hf-download-redhat`
 - `SERVED_MODEL_NAME=qwen36a3b-redhat-nvfp4-v0192rc1dev30-toolcallsanitize`
 - `VLLM_PORT=18054`
 - `INTERNAL_VLLM_PORT=18055`
@@ -94,6 +97,97 @@ Static validation done:
 - `python3 -m py_compile` on the sanitizer proxy
 - `docker compose --env-file .env -f compose.local.yml config`
 - container metadata checks for runtime versions, without loading the model
+
+## Canary Run
+
+Command used under the repository memory guard:
+
+```bash
+MEM_THRESHOLD_PERCENT=97 \
+MEM_POLL_SECONDS=5 \
+MEM_GUARD_LOG_FILE=/tmp/redhat_qwen36_nvfp4_canary_memguard_$(date +%Y%m%d_%H%M%S).log \
+scripts/safe_build_with_mem_guard.sh \
+  bash deploy/qwen36a3b-nvfp4-redhat-v0192rc1dev30-flashinfercutlass-toolcallsanitize-canary-20260424/run-canary-bench.sh
+```
+
+Lifecycle result:
+
+- router bench mode enabled, traffic drained, local prod stopped
+- canary launched on `:18054` and became healthy after `211s`
+- canary stopped after benchmarks
+- local prod restored and became healthy after `153s`
+- router bench mode disabled
+- memory stayed below the `97%` hard guard
+
+Runtime logs confirmed the intended NVFP4 paths:
+
+- `Using FlashInferCutlassNvFp4LinearKernel for NVFP4 GEMM`
+- `Using 'FLASHINFER_CUTLASS' NvFp4 MoE backend`
+
+## Benchmark Result
+
+First run:
+
+| Concurrency | PP 128 tok/s | TG 256 tok/s total | TG tok/s per request | Peak TG tok/s | TTFR |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| c1 | 1486.80 | 36.57 | 36.57 | 41.72 | 88.16 ms |
+| c4 | 2019.34 | 115.61 | 32.47 | 136.00 | 200.53 ms |
+| c8 | 3489.84 | 169.46 | 25.87 | 221.33 | 254.06 ms |
+| c16 | 4338.73 | 264.35 | 19.00 | 348.33 | 418.72 ms |
+| c24 | 4841.83 | 306.33 | 15.46 | 408.33 | 544.38 ms |
+
+Compared with the `20260421` production baseline:
+
+| Concurrency | PP delta | TG total delta | TTFR read |
+| --- | ---: | ---: | --- |
+| c1 | +24.5% | -24.0% | better |
+| c4 | -6.4% | +12.8% | equivalent |
+| c8 | +29.5% | +13.0% | better |
+| c16 | +24.5% | +34.6% | better |
+| c24 | +27.3% | +21.8% | better |
+
+Interpretation: strong concurrent throughput and prefill candidate, with a
+clear single-user decode regression at `c1`.
+
+## Tokenizer Rerun Fix
+
+The first `llama-benchy` run passed the container path
+`/models/RedHatAI-Qwen3.6-35B-A3B-NVFP4` as tokenizer. That path is valid for
+vLLM inside Docker, but invalid for `llama-benchy` on the host, so the bench
+fell back to its tokenizer approximation.
+
+The canary bundle now separates server and benchmark tokenizers:
+
+- vLLM keeps `TOKENIZER_ROOT=/models/RedHatAI-Qwen3.6-35B-A3B-NVFP4`
+- `llama-benchy` uses `BENCH_TOKENIZER=RedHatAI/Qwen3.6-35B-A3B-NVFP4`
+- benchmark tokenizer cache uses `BENCH_HF_HOME=/home/pablo/.cache/hf-download-redhat`
+
+Validation:
+
+```bash
+HF_HOME=/home/pablo/.cache/hf-download-redhat \
+uvx --with transformers python -c 'from transformers import AutoTokenizer; t=AutoTokenizer.from_pretrained("RedHatAI/Qwen3.6-35B-A3B-NVFP4"); print(t.__class__.__name__); print(t.eos_token_id); print(t.chat_template is not None)'
+```
+
+Observed output:
+
+```text
+TokenizersBackend
+248046
+True
+```
+
+For the rerun, the canary log must show:
+
+```text
+tokenizer: RedHatAI/Qwen3.6-35B-A3B-NVFP4
+```
+
+and must not contain:
+
+```text
+Error loading tokenizer
+```
 
 ## Safety Gate
 
