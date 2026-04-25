@@ -33,6 +33,7 @@ changes from the previous FP8 prod to RedHat NVFP4.
 - qwen3 coder argument filter: `ENABLE_QWEN3CODER_ARG_FILTER=1`
 - attention backend: `flashinfer`
 - MoE backend: `flashinfer_cutlass`
+- sampler: `VLLM_USE_FLASHINFER_SAMPLER=1` enabled on `2026-04-25 16:33 Europe/Paris`
 - quantization: `compressed-tensors`
 - max context: `32768`
 - max batched tokens: `8192`
@@ -82,10 +83,19 @@ Production baseline used for comparison:
 Known caveats to watch during the trial:
 
 - `TC-60` remains a shared sleeper-injection failure.
-- `TC-68` still fails on NVFP4 without request-level mitigation.
-- `TC-62` was partial on the latest full run.
+- `TC-60` remains the only safety warning after enabling FlashInfer sampler.
 - single-user decode throughput is lower than previous FP8 prod; high
   concurrency and prefill are stronger.
+
+FlashInfer sampler canary basis before prod enablement:
+
+- artifact: `tool-eval-runs/tool_eval_redhat_nvfp4_samplerfi_full_20260425_145450.json`
+- score: `93/100`
+- points: `128/138`
+- pass / partial / fail: `62 / 4 / 3`
+- responsiveness: `67`
+- deployability: `85`
+- runtime confirmation: `Using FlashInfer for top-p & top-k sampling.`
 
 ## Promotion Command
 
@@ -164,6 +174,7 @@ Observed immediately after promotion:
 - env check confirmed `ENABLE_TOOLCALL_SANITIZER=1`.
 - env check confirmed `ENABLE_QWEN3CODER_ARG_FILTER=1`.
 - env check confirmed `MAX_NUM_SEQS=44`.
+- runtime log confirmed `Using FlashInfer for top-p & top-k sampling.`
 - router chat backend reports `qwen35a3b-prod=true`.
 - router global health still reports `ok=false` because
   `qwen35a3b-batch=false`; this was already observed before the promotion and
