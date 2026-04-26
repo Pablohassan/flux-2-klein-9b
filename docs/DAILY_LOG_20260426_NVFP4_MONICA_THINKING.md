@@ -216,6 +216,79 @@ Artifact prefix:
 | `c16` | `4321.32` | `234.31` | `430.74 ms` |
 | `c24` | `5174.63` | `296.35` | `573.32 ms` |
 
+## French Public Usage And Script Mixing
+
+Observation from external chat testing:
+
+- The model occasionally inserted a Chinese character sequence inside a French
+  answer, e.g. `弗兰ée`.
+- Quick controlled probes through the gateway did not reproduce the issue with
+  constrained sampling, which points to a sampling/prompting sensitivity rather
+  than a UTF-8 or Open WebUI rendering problem.
+
+Research basis:
+
+- Qwen3 documentation confirms strong multilingual support and explicit
+  thinking/non-thinking modes, and recommends constrained sampling for
+  non-thinking mode. It also warns that high presence penalties may
+  occasionally cause language mixing and slight performance degradation:
+  `https://huggingface.co/Qwen/Qwen3-8B/blob/main/README.md`
+- Qwen3.6 documentation recommends, for instruct/non-thinking mode,
+  `temperature=0.7`, `top_p=0.80`, `top_k=20`, `min_p=0.0`,
+  `presence_penalty=1.5`, `repetition_penalty=1.0`, while noting parameter
+  support depends on the serving framework:
+  `https://huggingface.co/Qwen/Qwen3.6-35B-A3B`
+- The active NVFP4 model is a quantized RedHatAI build of
+  `Qwen/Qwen3.6-35B-A3B`, compatible with vLLM:
+  `https://huggingface.co/RedHatAI/Qwen3.6-35B-A3B-NVFP4`
+- Multilingual LLM research shows that code-switching and mixed-script behavior
+  remains a weak point even for strong multilingual models:
+  `https://arxiv.org/abs/2305.14235`
+- A 2026 CodeMixQA paper reaches a similar conclusion for understanding,
+  reasoning over, and generating code-switched text:
+  `https://arxiv.org/abs/2601.07153`
+
+Conclusion:
+
+- The Chinese-character artifact is consistent with multilingual/script mixing,
+  not with an encoding bug.
+- For public French chat, use non-thinking mode by default.
+- Use a French system prompt to constrain output script and language.
+- Prefer moderately constrained sampling over high-creativity settings.
+- Keep presence penalty low at first. Although Qwen3.6 officially uses
+  `presence_penalty=1.5` in some recommendations, Qwen3 guidance explicitly
+  notes that higher values can occasionally increase language mixing. For this
+  French public endpoint, script stability is more important than novelty.
+
+Recommended French system prompt:
+
+```text
+Tu réponds en français naturel, précis et idiomatique.
+Utilise uniquement l'alphabet latin, les accents français, les chiffres, les symboles usuels et la ponctuation française.
+N'utilise jamais de caractères chinois, japonais, coréens, cyrilliques ou d'autres scripts non latins, sauf si l'utilisateur le demande explicitement.
+Si un nom, mot ou concept étranger est nécessaire, écris-le en alphabet latin ou reformule en français.
+```
+
+Recommended Open WebUI / external French defaults:
+
+```text
+model: qwen3.6-35B-3A-chat
+thinking: off by default
+temperature: 0.3 to 0.5
+top_p: 0.8
+top_k: 20
+min_p: 0.0 or 0.05
+presence_penalty: 0.0 to 0.5 initially
+repetition_penalty: 1.05 if needed
+max_tokens: 2048 or 4096 for normal chat
+```
+
+Operational note:
+
+- Do not add a hard output filter yet. First stabilize via system prompt and
+  sampling. If script mixing persists under these settings, add a gateway-level
+  guard or post-generation detector as a separate measured change.
+
 ## Safety Procedure Status
 
 All tests followed the gateway safety posture:
@@ -226,4 +299,3 @@ All tests followed the gateway safety posture:
 - memory guard remained well below the `97%` limit,
 - bench mode was disabled at the end,
 - final gateway health was OK.
-
