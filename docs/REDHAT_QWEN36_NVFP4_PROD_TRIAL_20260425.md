@@ -82,7 +82,6 @@ Production baseline used for comparison:
 
 Known caveats to watch during the trial:
 
-- `TC-60` remains a shared sleeper-injection failure.
 - `TC-60` remains the only safety warning after enabling FlashInfer sampler.
 - single-user decode throughput is lower than previous FP8 prod; high
   concurrency and prefill are stronger.
