@@ -61,8 +61,8 @@ It runs:
 Guard thresholds:
 
 - stop batch if vLLM GPU/unified memory exceeds `50000 MiB`
-- stop batch if system RAM exceeds `90%`
-- stop batch if available RAM drops below `16384 MiB`
+- stop batch if system RAM exceeds `97%`
+- stop batch if available RAM drops below `9000 MiB`
 - require `2` consecutive breaches before stopping
 
 On breach, the guard first disables the Docker restart policy with
