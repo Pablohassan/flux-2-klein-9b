@@ -1,0 +1,61 @@
+diff --git a/vllm/model_executor/layers/fla/ops/utils.py b/vllm/model_executor/layers/fla/ops/utils.py
+--- a/vllm/model_executor/layers/fla/ops/utils.py
++++ b/vllm/model_executor/layers/fla/ops/utils.py
+@@ -48,6 +48,12 @@
+     cache_entries: tuple[tuple | None, dict | None, Any] = []
+     cache_size = 8
+ 
++    def _insert(args: tuple, kwargs: dict, result: Any) -> None:
++        nonlocal cache_entries
++        if len(cache_entries) >= cache_size:
++            cache_entries = cache_entries[1:]
++        cache_entries.append((args, kwargs, result))
++
+     @functools.wraps(fn)
+     def wrapper(*args: Any, **kwargs: Any) -> Any:
+         nonlocal cache_entries, cache_size
+@@ -69,12 +75,14 @@
+                 return last_result
+ 
+         result = fn(*args, **kwargs)
+-
+-        if len(cache_entries) >= cache_size:
+-            cache_entries = cache_entries[1:]
+-        cache_entries.append((args, kwargs, result))
++        _insert(args, kwargs, result)
+         return result
+ 
++    def register(result: Any, *args: Any, **kwargs: Any) -> None:
++        _insert(args, kwargs, result)
++
++    wrapper.register = register  # type: ignore[attr-defined]
++
+     return wrapper
+ 
+ 
+diff --git a/vllm/v1/attention/backends/gdn_attn.py b/vllm/v1/attention/backends/gdn_attn.py
+--- a/vllm/v1/attention/backends/gdn_attn.py
++++ b/vllm/v1/attention/backends/gdn_attn.py
+@@ -315,6 +315,22 @@
+         else:
+             has_initial_state = None
+ 
++        if non_spec_query_start_loc_cpu is not None:
++            # Pre-compute chunk_indices on CPU to avoid the GPU->CPU sync
++            # triggered by prepare_chunk_indices(...).tolist() on the first
++            # GDN prefill call in a step.
++            from vllm.model_executor.layers.fla.ops.index import (
++                prepare_chunk_indices,
++            )
++
++            chunk_size = 64
++            chunk_indices = prepare_chunk_indices(
++                non_spec_query_start_loc_cpu, chunk_size
++            ).to(query_start_loc.device, non_blocking=True)
++            prepare_chunk_indices.register(  # type: ignore[attr-defined]
++                chunk_indices, non_spec_query_start_loc, chunk_size
++            )
++
+         # Function code counted on either presency non-spec decode or spec decode,
+         # but not both.
+         assert not (num_decodes > 0 and num_spec_decodes > 0), (
