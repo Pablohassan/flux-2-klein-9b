@@ -15,7 +15,9 @@ PROD_PORT=18000
 TOKENIZER="${BENCH_TOKENIZER:-/home/pablo/models/Qwen3.6-35B-A3B-PrismaQuant-4.75bit-vllm-latest-20260423}"
 export HF_HOME="${BENCH_HF_HOME:-$HOME/.cache/huggingface}"
 
-CONCURRENCIES=(1 4 8 16 24)
+# This SparkArena profile is configured with MAX_NUM_SEQS=4. c16/c24 overloads
+# the profile and can crash the engine, so keep the strict canary bench bounded.
+CONCURRENCIES=(${BENCH_CONCURRENCIES:-1 4 8})
 BENCH_PP=128
 BENCH_TG=256
 BENCH_RUNS=3
@@ -112,7 +114,17 @@ on_signal() {
   restore_prod_and_gateway
   exit 130
 }
+on_exit() {
+  status=$?
+  if [[ "$status" -ne 0 ]]; then
+    log "=== ERROR CLEANUP status=${status} ==="
+    restore_prod_and_gateway
+  fi
+  exit "$status"
+}
+
 trap on_signal INT TERM
+trap on_exit EXIT
 
 log "=== SparkArena PrismaQuant MTP k=3 campaign ==="
 log "Canary dir: $CANARY_DIR"
@@ -256,6 +268,7 @@ log "=== STEP 11: Disable bench mode ==="
 BENCH_MODE_ON=false
 
 trap - INT TERM
+trap - EXIT
 log "=== CAMPAIGN COMPLETE ==="
 log "Perf files: $CANARY_DIR/llama_benchy_prismaquant_sparkarena_mtp3_c*_${TS}.md"
 log "Tool eval:  $CANARY_TOOL_OUT"
