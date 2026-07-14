@@ -1,0 +1,236 @@
+--- a/vllm/v1/core/kv_cache_coordinator.py
++++ b/vllm/v1/core/kv_cache_coordinator.py
+@@ -489,7 +489,10 @@ def find_longest_cache_hit(
+             kv_cache_group_ids=[0],
+             block_pool=self.block_pool,
+             kv_cache_spec=self.kv_cache_spec,
+-            drop_eagle_block=0 in self.eagle_group_ids,
++            drop_eagle_block=(
++                0 in self.eagle_group_ids
++                and self.kv_cache_spec.supports_eagle_cache_peek
++            ),
+             alignment_tokens=self.block_size,
+             dcp_world_size=self.dcp_world_size,
+             pcp_world_size=self.pcp_world_size,
+@@ -707,7 +710,8 @@ def _get_block_hashes(block_size: int) -> BlockHashList:
+                     )
+                     continue
+ 
+-                drop_eagle_block = use_eagle and idx not in eagle_verified
++                can_eagle_peek = use_eagle and spec.supports_eagle_cache_peek
++                drop_eagle_block = can_eagle_peek and idx not in eagle_verified
+ 
+                 _max_length = curr_hit_length
+                 if drop_eagle_block:
+@@ -735,7 +739,7 @@ def _get_block_hashes(block_size: int) -> BlockHashList:
+                 elif _new_hit_length < curr_hit_length:
+                     # length shrunk; invalidate previous eagle verifications
+                     eagle_verified.clear()
+-                curr_hit_length = _new_hit_length
++                curr_hit_length = min(curr_hit_length, _new_hit_length)
+                 for group_id, blocks in zip(group_ids, hit_blocks):
+                     hit_blocks_by_group[group_id] = blocks
+ 
+@@ -794,7 +798,10 @@ def _get_block_hashes(kv_cache_spec: KVCacheSpec) -> BlockHashList:
+                 kv_cache_group_ids=group_ids,
+                 block_pool=self.block_pool,
+                 kv_cache_spec=spec,
+-                drop_eagle_block=use_eagle,
++                # Recurrent-state specs never participate in the eagle
++                # drop-last-block peek (#43559). Currently a no-op safety
++                # gate: MambaManager ignores drop_eagle_block.
++                drop_eagle_block=use_eagle and spec.supports_eagle_cache_peek,
+                 alignment_tokens=self.scheduler_block_size,
+             )
+             group_hit = len(blocks[0]) * spec.block_size
+--- a/vllm/v1/core/sched/scheduler.py
++++ b/vllm/v1/core/sched/scheduler.py
+@@ -30,6 +30,7 @@
+ from vllm.multimodal import MULTIMODAL_REGISTRY, MultiModalRegistry
+ from vllm.multimodal.encoder_budget import MultiModalBudget
+ from vllm.multimodal.utils import get_mm_features_in_window
++from vllm.utils.math_utils import round_down
+ from vllm.v1.core.encoder_cache_manager import (
+     EncoderCacheManager,
+     EncoderDecoderCacheManager,
+@@ -354,7 +355,8 @@ def _mamba_block_aligned_split(
+         #                       num_prompt_tokens + num_output_tokens
+         #                     )
+         # NOTE: Use `request.num_tokens - 1` to bypass normal decoding.
+-        if num_computed_tokens < max(request.num_prompt_tokens, request.num_tokens - 1):
++        prefill_end = max(request.num_prompt_tokens, request.num_tokens - 1)
++        if num_computed_tokens < prefill_end:
+             # To enable block-aligned caching of the Mamba state, `num_new_tokens`
+             # must be a multiple of `block_size`.
+             # As an exception, if `num_new_tokens` is less than `block_size`, the
+@@ -367,30 +369,46 @@ def _mamba_block_aligned_split(
+             # eagle prune
+             if self.use_eagle:
+                 last_cache_position = max(last_cache_position - block_size, 0)
++            # Marconi cache admission optimization: stop at the uncached
++            # common prefix so concurrent requests can share it. Applied as
++            # an end-position cap BEFORE the alignment below; rounding the
++            # capped chunk length afterwards (the previous form) would
++            # reintroduce an unaligned non-final chunk end whenever the
++            # start offset is unaligned (external KV) — the same #43559
++            # poisoning geometry the branches below prevent.
++            if (
++                num_uncached_common_prefix_tokens >= block_size
++                and num_new_tokens > num_uncached_common_prefix_tokens
++            ):
++                num_new_tokens = num_uncached_common_prefix_tokens
+             num_computed_tokens_after_sched = num_computed_tokens + num_new_tokens
+             if num_computed_tokens_after_sched < last_cache_position:
+-                # align to block_size
+-                num_new_tokens = num_new_tokens // block_size * block_size
++                # Align the chunk END; the start may be unaligned (external KV).
++                num_new_tokens = max(
++                    round_down(num_computed_tokens_after_sched, block_size)
++                    - num_computed_tokens,
++                    0,
++                )
+             elif (
+                 num_computed_tokens
+                 < last_cache_position
+                 < num_computed_tokens_after_sched
+             ):
+                 # force to cache the last chunk
+                 num_new_tokens = last_cache_position - num_computed_tokens
+-            else:
+-                # prefill the last few tokens
+-                pass
+-
+-            # Marconi cache admission optimization:
+-            # cache common prefixes by scheduling num_new_tokens = common prefix length
+-            if (
+-                num_uncached_common_prefix_tokens >= block_size
+-                and num_new_tokens > num_uncached_common_prefix_tokens
+-            ):
+-                num_new_tokens = num_uncached_common_prefix_tokens
+-                # keep alignment to block_size
+-                num_new_tokens = num_new_tokens // block_size * block_size
++            elif num_computed_tokens_after_sched < prefill_end:
++                # Non-final chunk past the last cacheable boundary: the kernel
++                # snapshots the chunk-end state into an aligned block-table slot
++                # and cache_blocks later hashes that slot as the boundary state,
++                # so a mid-block end poisons the prefix cache (#43559). Stop at
++                # the last reachable boundary; defer (0) if none is reachable.
++                # Only the final chunk may end unaligned: its slot is never
++                # hashed (num_full_blocks floors past it).
++                num_new_tokens = max(
++                    round_down(num_computed_tokens_after_sched, block_size)
++                    - num_computed_tokens,
++                    0,
++                )
+         return num_new_tokens
+ 
+     def schedule(self, throttle_prefills: bool = False) -> SchedulerOutput:
+--- a/vllm/v1/core/single_type_kv_cache_manager.py
++++ b/vllm/v1/core/single_type_kv_cache_manager.py
+@@ -1120,9 +1120,15 @@ def reachable_block_mask(
+         mask = [False] * (end_block - start_block)
+ 
+         # (1) Segment-boundary states. A Mamba hit needs exactly the single
+-        # state block ending on the boundary (no window, and draft models have
+-        # no mamba layers, so no eagle shift). Block ``i`` ends at token
+-        # ``(i + 1) * block_size``.
++        # state block ending on the boundary (no window). The eagle shift
++        # applied in (2) is intentionally omitted here: with EAGLE, a shared
++        # prefix that diverges within one alignment block past a boundary S
++        # pops to an attention-verified hit below S, and the hybrid min()
++        # clamp then falls back to the previous segment boundary — a bounded
++        # reuse loss of at most one retention interval (never corruption).
++        # Also retaining S - alignment_tokens would recover it at the cost of
++        # one extra state per segment; revisit with selective retention
++        # (#47782). Block ``i`` ends at token ``(i + 1) * block_size``.
+         segment_tokens = None if retention_interval == 0 else retention_interval
+         if segment_tokens is not None:
+             per_segment = segment_tokens // block_size
+@@ -1138,12 +1144,20 @@ def reachable_block_mask(
+         # (2) Replay boundary. ``get_computed_blocks`` caps hits at
+         # ``num_prompt - 1``, so an exact prompt replay lands on the latest
+         # fine-aligned boundary. Sparse retention would otherwise skip its
+-        # state, so keep it explicitly.
++        # state, so keep it explicitly. With EAGLE the attention lookup pops
++        # its last matched block and re-aligns downward, so a replay can
++        # verify at most ``latest - alignment_tokens``; retain that boundary
++        # state too, or the hybrid min() hit clamp pins every replay hit
++        # to 0 (a silently-disabled cache).
+         if num_prompt_tokens is not None:
+             latest = (num_prompt_tokens - 1) // alignment_tokens * alignment_tokens
+-            boundary_block = latest // block_size - 1
+-            if start_block <= boundary_block < end_block:
+-                mask[boundary_block - start_block] = True
++            replay_boundaries = [latest]
++            if use_eagle:
++                replay_boundaries.append(latest - alignment_tokens)
++            for boundary in replay_boundaries:
++                boundary_block = boundary // block_size - 1
++                if start_block <= boundary_block < end_block:
++                    mask[boundary_block - start_block] = True
+ 
+         return mask
+ 
+--- a/vllm/v1/engine/llm_engine.py
++++ b/vllm/v1/engine/llm_engine.py
+@@ -319,17 +319,24 @@ def step(self) -> list[RequestOutput | PoolingRequestOutput]:
+ 
+         # 4) Record stats
+         with record_function_or_nullcontext("llm_engine step: record_stats"):
+-            if (
+-                self.logger_manager is not None
+-                and outputs.scheduler_stats is not None
+-                and len(outputs.outputs) > 0
+-            ):
++            if self.logger_manager is not None and outputs.scheduler_stats is not None:
++                # Record even when this step produced no request outputs:
++                # Scheduler.make_stats() drains the prefix-cache counters
++                # every step and attaches them to a (possibly empty)
++                # EngineCoreOutputs, so skipping the record here would lose
++                # them permanently (e.g. a cache hit consumed by a non-final
++                # prefill chunk of an otherwise idle engine). IterationStats
++                # is populated only from request outputs, so on zero-output
++                # steps it is identically zero; pass None to avoid spurious
++                # 0 samples in the iteration-tokens histogram. Only the
++                # interval log stays tied to output-bearing steps.
+                 self.logger_manager.record(
+                     scheduler_stats=outputs.scheduler_stats,
+-                    iteration_stats=iteration_stats,
++                    iteration_stats=iteration_stats if outputs.outputs else None,
+                     mm_cache_stats=self.renderer.stat_mm_cache(),
+                 )
+-                self.do_log_stats_with_interval()
++                if len(outputs.outputs) > 0:
++                    self.do_log_stats_with_interval()
+ 
+         return processed_outputs.request_outputs
+ 
+--- a/vllm/v1/kv_cache_interface.py
++++ b/vllm/v1/kv_cache_interface.py
+@@ -119,6 +119,15 @@ def page_size_bytes(self) -> int:
+     def storage_block_size(self) -> int:
+         return self.block_size
+ 
++    @property
++    def supports_eagle_cache_peek(self) -> bool:
++        """Whether EAGLE cache lookup may peek one extra block for this spec
++        and drop the last matched block afterwards. Recurrent-state specs
++        (e.g. Mamba) must not participate: their block at position p stores
++        the state after exactly (p + 1) * block_size tokens, so a lookahead
++        hit would resume from a state ahead of the token prefix."""
++        return True
++
+     def max_memory_usage_bytes(self, vllm_config: VllmConfig) -> int:
+         """
+         The maximum possible memory usage of this KV cache in bytes.
+@@ -710,6 +719,10 @@ def page_size_bytes(self) -> int:
+             return self.page_size_padded
+         return page_size
+ 
++    @property
++    def supports_eagle_cache_peek(self) -> bool:
++        return False
++
+     def max_memory_usage_bytes(self, vllm_config: VllmConfig) -> int:
+         if vllm_config.cache_config.mamba_cache_mode == "all":
+             max_model_len = vllm_config.model_config.max_model_len
